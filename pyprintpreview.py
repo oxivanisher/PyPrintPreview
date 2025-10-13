@@ -7,6 +7,7 @@ Supports fill (crop) and fit (border) modes with automatic orientation detection
 import sys
 import os
 import json
+import locale
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +27,99 @@ try:
 except ImportError:
     print("Error: Pillow is required. Install with: pip install Pillow")
     sys.exit(1)
+
+
+class Translations:
+    """Manages application translations for multiple languages"""
+
+    LANGUAGES = {
+        'en': 'English',
+        'de': 'Deutsch'
+    }
+
+    STRINGS = {
+        'en': {
+            'window_title': 'Photo Print Preview',
+            'title_label': 'Photo Print Preview - 4x6" Glossy Paper',
+            'print_mode': 'Print Mode:',
+            'fill_mode': 'Fill (Crop to fit paper)',
+            'fill_tooltip': 'Crop image to completely fill the paper with no borders',
+            'fit_mode': 'Fit (Scale with borders)',
+            'fit_tooltip': 'Scale image to fit within paper, may have white borders',
+            'printer': 'Printer:',
+            'language': 'Language:',
+            'info_text': 'The script automatically rotates landscape images for proper printing.\nPaper orientation: Always portrait (4" width × 6" height)',
+            'open_image': 'Open Image...',
+            'print': 'Print',
+            'close': 'Close',
+            'error': 'Error',
+            'success': 'Success',
+            'no_image': 'No Image',
+            'warning': 'Warning',
+            'load_error': 'Could not load image:',
+            'no_image_loaded': 'Please load an image first.',
+            'print_success': 'Print job sent successfully!',
+            'print_error': 'Could not generate print image.',
+            'select_image': 'Select Image',
+            'images': 'Images',
+            'print_photo': 'Print Photo',
+        },
+        'de': {
+            'window_title': 'Fotodruck-Vorschau',
+            'title_label': 'Fotodruck-Vorschau - 4x6" Fotopapier',
+            'print_mode': 'Druckmodus:',
+            'fill_mode': 'Füllen (Zuschneiden)',
+            'fill_tooltip': 'Bild zuschneiden, um das Papier vollständig ohne Rand zu füllen',
+            'fit_mode': 'Einpassen (Mit Rand)',
+            'fit_tooltip': 'Bild einpassen, kann weiße Ränder haben',
+            'printer': 'Drucker:',
+            'language': 'Sprache:',
+            'info_text': 'Das Skript dreht Querformat-Bilder automatisch für den korrekten Druck.\nPapierausrichtung: Immer Hochformat (4" Breite × 6" Höhe)',
+            'open_image': 'Bild öffnen...',
+            'print': 'Drucken',
+            'close': 'Schließen',
+            'error': 'Fehler',
+            'success': 'Erfolg',
+            'no_image': 'Kein Bild',
+            'warning': 'Warnung',
+            'load_error': 'Bild konnte nicht geladen werden:',
+            'no_image_loaded': 'Bitte laden Sie zuerst ein Bild.',
+            'print_success': 'Druckauftrag erfolgreich gesendet!',
+            'print_error': 'Druckbild konnte nicht erstellt werden.',
+            'select_image': 'Bild auswählen',
+            'images': 'Bilder',
+            'print_photo': 'Foto drucken',
+        }
+    }
+
+    def __init__(self):
+        self.current_lang = self._detect_system_language()
+
+    def _detect_system_language(self) -> str:
+        """Detect system language, default to English"""
+        try:
+            # Try to get the current locale
+            system_locale = locale.getlocale()[0]
+            if system_locale:
+                lang_code = system_locale.split('_')[0].lower()
+                if lang_code in self.LANGUAGES:
+                    return lang_code
+        except Exception:
+            pass
+        return 'en'
+
+    def set_language(self, lang_code: str):
+        """Set the current language"""
+        if lang_code in self.LANGUAGES:
+            self.current_lang = lang_code
+
+    def get(self, key: str) -> str:
+        """Get a translated string"""
+        return self.STRINGS.get(self.current_lang, {}).get(key, key)
+
+    def get_current_language(self) -> str:
+        """Get current language code"""
+        return self.current_lang
 
 
 class Config:
@@ -51,7 +145,8 @@ class Config:
             'last_scale_mode': 'fill',
             'paper_size': '4x6',
             'borderless': True,
-            'quality': 'high'
+            'quality': 'high',
+            'language': None  # None means auto-detect
         }
 
     def save(self):
@@ -75,8 +170,9 @@ class Config:
 class PhotoPreview(QLabel):
     """Widget for displaying photo preview with fill/fit modes"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, translations=None):
         super().__init__(parent)
+        self.translations = translations
         self.setMinimumSize(600, 400)
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet("QLabel { background-color: #2b2b2b; border: 2px solid #555; }")
@@ -113,7 +209,9 @@ class PhotoPreview(QLabel):
             return True
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not load image:\n{str(e)}")
+            error_title = self.translations.get('error') if self.translations else "Error"
+            error_msg = self.translations.get('load_error') if self.translations else "Could not load image:"
+            QMessageBox.critical(self, error_title, f"{error_msg}\n{str(e)}")
             return False
 
     def set_scale_mode(self, mode: str):
@@ -299,7 +397,13 @@ class PhotoPrintWindow(QMainWindow):
         self.config = Config()
         self.image_path = image_path
 
-        self.setWindowTitle("Photo Print Preview")
+        # Initialize translations
+        self.translations = Translations()
+        saved_lang = self.config.get('language')
+        if saved_lang:
+            self.translations.set_language(saved_lang)
+
+        self.setWindowTitle(self.translations.get('window_title'))
         self.setMinimumSize(800, 700)
 
         self.init_ui()
@@ -317,13 +421,13 @@ class PhotoPrintWindow(QMainWindow):
         layout.setContentsMargins(15, 15, 15, 15)
 
         # Title
-        title_label = QLabel("Photo Print Preview - 4x6\" Glossy Paper")
+        title_label = QLabel(self.translations.get('title_label'))
         title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
 
         # Preview widget
-        self.preview = PhotoPreview()
+        self.preview = PhotoPreview(translations=self.translations)
         self.preview.set_scale_mode(self.config.get('last_scale_mode', 'fill'))
         layout.addWidget(self.preview, stretch=1)
 
@@ -337,19 +441,19 @@ class PhotoPrintWindow(QMainWindow):
         scale_layout = QHBoxLayout(scale_group)
         scale_layout.setContentsMargins(0, 0, 0, 0)
 
-        scale_label = QLabel("Print Mode:")
+        scale_label = QLabel(self.translations.get('print_mode'))
         scale_label.setStyleSheet("font-weight: bold;")
         scale_layout.addWidget(scale_label)
 
         self.scale_button_group = QButtonGroup()
 
-        self.fill_radio = QRadioButton("Fill (Crop to fit paper)")
-        self.fill_radio.setToolTip("Crop image to completely fill the paper with no borders")
+        self.fill_radio = QRadioButton(self.translations.get('fill_mode'))
+        self.fill_radio.setToolTip(self.translations.get('fill_tooltip'))
         self.scale_button_group.addButton(self.fill_radio, 0)
         scale_layout.addWidget(self.fill_radio)
 
-        self.fit_radio = QRadioButton("Fit (Scale with borders)")
-        self.fit_radio.setToolTip("Scale image to fit within paper, may have white borders")
+        self.fit_radio = QRadioButton(self.translations.get('fit_mode'))
+        self.fit_radio.setToolTip(self.translations.get('fit_tooltip'))
         self.scale_button_group.addButton(self.fit_radio, 1)
         scale_layout.addWidget(self.fit_radio)
 
@@ -365,12 +469,38 @@ class PhotoPrintWindow(QMainWindow):
 
         controls_layout.addWidget(scale_group)
 
+        # Language selection
+        lang_group = QWidget()
+        lang_layout = QHBoxLayout(lang_group)
+        lang_layout.setContentsMargins(0, 0, 0, 0)
+
+        lang_label = QLabel(self.translations.get('language'))
+        lang_label.setStyleSheet("font-weight: bold;")
+        lang_layout.addWidget(lang_label)
+
+        self.language_combo = QComboBox()
+        for lang_code, lang_name in Translations.LANGUAGES.items():
+            self.language_combo.addItem(lang_name, lang_code)
+
+        # Set current language
+        current_lang = self.translations.get_current_language()
+        for i in range(self.language_combo.count()):
+            if self.language_combo.itemData(i) == current_lang:
+                self.language_combo.setCurrentIndex(i)
+                break
+
+        self.language_combo.currentIndexChanged.connect(self.on_language_changed)
+        lang_layout.addWidget(self.language_combo)
+        lang_layout.addStretch()
+
+        controls_layout.addWidget(lang_group)
+
         # Printer selection
         printer_group = QWidget()
         printer_layout = QHBoxLayout(printer_group)
         printer_layout.setContentsMargins(0, 0, 0, 0)
 
-        printer_label = QLabel("Printer:")
+        printer_label = QLabel(self.translations.get('printer'))
         printer_label.setStyleSheet("font-weight: bold;")
         printer_layout.addWidget(printer_label)
 
@@ -381,13 +511,10 @@ class PhotoPrintWindow(QMainWindow):
         controls_layout.addWidget(printer_group)
 
         # Info label
-        info_label = QLabel(
-            "The script automatically rotates landscape images for proper printing.\n"
-            "Paper orientation: Always portrait (4\" width � 6\" height)"
-        )
-        info_label.setStyleSheet("color: #666; font-size: 11px;")
-        info_label.setWordWrap(True)
-        controls_layout.addWidget(info_label)
+        self.info_label = QLabel(self.translations.get('info_text'))
+        self.info_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.info_label.setWordWrap(True)
+        controls_layout.addWidget(self.info_label)
 
         layout.addWidget(controls_widget)
 
@@ -396,13 +523,13 @@ class PhotoPrintWindow(QMainWindow):
         button_layout = QHBoxLayout(button_widget)
         button_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.open_button = QPushButton("Open Image...")
+        self.open_button = QPushButton(self.translations.get('open_image'))
         self.open_button.clicked.connect(self.open_image_dialog)
         button_layout.addWidget(self.open_button)
 
         button_layout.addStretch()
 
-        self.print_button = QPushButton("Print")
+        self.print_button = QPushButton(self.translations.get('print'))
         self.print_button.setStyleSheet(
             "QPushButton { background-color: #4CAF50; color: white; "
             "padding: 8px 24px; font-weight: bold; font-size: 14px; }"
@@ -412,7 +539,7 @@ class PhotoPrintWindow(QMainWindow):
         self.print_button.setEnabled(False)
         button_layout.addWidget(self.print_button)
 
-        self.close_button = QPushButton("Close")
+        self.close_button = QPushButton(self.translations.get('close'))
         self.close_button.clicked.connect(self.close)
         button_layout.addWidget(self.close_button)
 
@@ -448,13 +575,48 @@ class PhotoPrintWindow(QMainWindow):
         self.preview.set_scale_mode(mode)
         self.config.set('last_scale_mode', mode)
 
+    def on_language_changed(self):
+        """Handle language change"""
+        lang_code = self.language_combo.currentData()
+        if lang_code:
+            self.translations.set_language(lang_code)
+            self.config.set('language', lang_code)
+            self.update_ui_texts()
+
+    def update_ui_texts(self):
+        """Update all UI texts with current language"""
+        self.setWindowTitle(self.translations.get('window_title'))
+
+        # Update title label
+        title = self.findChild(QLabel)
+        if title:
+            title.setText(self.translations.get('title_label'))
+
+        # Update buttons
+        self.open_button.setText(self.translations.get('open_image'))
+        self.print_button.setText(self.translations.get('print'))
+        self.close_button.setText(self.translations.get('close'))
+
+        # Update radio buttons
+        self.fill_radio.setText(self.translations.get('fill_mode'))
+        self.fill_radio.setToolTip(self.translations.get('fill_tooltip'))
+        self.fit_radio.setText(self.translations.get('fit_mode'))
+        self.fit_radio.setToolTip(self.translations.get('fit_tooltip'))
+
+        # Update info label
+        self.info_label.setText(self.translations.get('info_text'))
+
+        # Update window title with image name if loaded
+        if self.image_path:
+            self.setWindowTitle(f"{self.translations.get('window_title')} - {os.path.basename(self.image_path)}")
+
     def open_image_dialog(self):
         """Open file dialog to select an image"""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Image",
+            self.translations.get('select_image'),
             os.path.expanduser("~"),
-            "Images (*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.webp)"
+            f"{self.translations.get('images')} (*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.webp)"
         )
 
         if file_path:
@@ -465,12 +627,13 @@ class PhotoPrintWindow(QMainWindow):
         self.image_path = image_path
         if self.preview.load_image(image_path):
             self.print_button.setEnabled(True)
-            self.setWindowTitle(f"Photo Print Preview - {os.path.basename(image_path)}")
+            self.setWindowTitle(f"{self.translations.get('window_title')} - {os.path.basename(image_path)}")
 
     def print_image(self):
         """Print the image with current settings"""
         if not self.preview.original_image:
-            QMessageBox.warning(self, "No Image", "Please load an image first.")
+            QMessageBox.warning(self, self.translations.get('no_image'),
+                              self.translations.get('no_image_loaded'))
             return
 
         # Save printer selection
@@ -500,7 +663,7 @@ class PhotoPrintWindow(QMainWindow):
 
         # Show print dialog
         dialog = QPrintDialog(printer, self)
-        dialog.setWindowTitle("Print Photo")
+        dialog.setWindowTitle(self.translations.get('print_photo'))
 
         if dialog.exec_() == QPrintDialog.Accepted:
             # Get print-ready pixmap
@@ -516,9 +679,11 @@ class PhotoPrintWindow(QMainWindow):
                 painter.drawPixmap(page_rect.toRect(), pixmap)
                 painter.end()
 
-                QMessageBox.information(self, "Success", "Print job sent successfully!")
+                QMessageBox.information(self, self.translations.get('success'),
+                                      self.translations.get('print_success'))
             else:
-                QMessageBox.critical(self, "Error", "Could not generate print image.")
+                QMessageBox.critical(self, self.translations.get('error'),
+                                   self.translations.get('print_error'))
 
 
 def main():
