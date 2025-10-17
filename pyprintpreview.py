@@ -14,7 +14,8 @@ from typing import Optional
 try:
     from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                  QHBoxLayout, QPushButton, QLabel, QRadioButton,
-                                 QButtonGroup, QComboBox, QMessageBox, QFileDialog)
+                                 QButtonGroup, QComboBox, QMessageBox, QFileDialog,
+                                 QCheckBox)
     from PyQt5.QtCore import Qt, QSizeF
     from PyQt5.QtGui import QPixmap, QPainter, QImage
     from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPrinterInfo
@@ -63,6 +64,14 @@ class Translations:
             'select_image': 'Select Image',
             'images': 'Images',
             'print_photo': 'Print Photo',
+            'printer_settings': 'Printer Settings',
+            'force_portrait': 'Always use portrait orientation (Canon PIXMA)',
+            'force_portrait_tooltip': 'Canon PIXMA printers require portrait orientation even for landscape photos',
+            'paper_source': 'Paper Source:',
+            'paper_source_auto': 'Auto',
+            'paper_source_rear': 'Rear Tray',
+            'paper_source_front': 'Front Tray',
+            'paper_source_top': 'Top Tray',
         },
         'de': {
             'window_title': 'Fotodruck-Vorschau',
@@ -89,6 +98,14 @@ class Translations:
             'select_image': 'Bild auswählen',
             'images': 'Bilder',
             'print_photo': 'Foto drucken',
+            'printer_settings': 'Druckereinstellungen',
+            'force_portrait': 'Immer Hochformat verwenden (Canon PIXMA)',
+            'force_portrait_tooltip': 'Canon PIXMA-Drucker erfordern Hochformat auch für Querformat-Fotos',
+            'paper_source': 'Papierquelle:',
+            'paper_source_auto': 'Auto',
+            'paper_source_rear': 'Hinteres Fach',
+            'paper_source_front': 'Vorderes Fach',
+            'paper_source_top': 'Oberes Fach',
         }
     }
 
@@ -146,7 +163,9 @@ class Config:
             'paper_size': '4x6',
             'borderless': True,
             'quality': 'high',
-            'language': None  # None means auto-detect
+            'language': None,  # None means auto-detect
+            'force_portrait': True,  # Force portrait orientation for Canon PIXMA compatibility
+            'paper_source': 'auto'  # 'auto', 'rear', 'front', 'top', etc.
         }
 
     def save(self):
@@ -324,7 +343,13 @@ class PhotoPreview(QLabel):
         self.update_preview()
 
     def get_print_pixmap(self) -> QPixmap:
-        """Generate high-resolution pixmap for printing"""
+        """Generate high-resolution pixmap for printing
+
+        Always creates a portrait-oriented canvas (4"x6" = 1200x1800px) for borderless printing.
+        For landscape images, the image is rotated 90° to fit within the portrait canvas.
+        This ensures proper borderless printing on Canon PIXMA and similar printers that
+        require paper inserted in portrait orientation.
+        """
         if not self.original_image:
             return None
 
@@ -332,15 +357,10 @@ class PhotoPreview(QLabel):
         img_height = self.original_image.height()
         img_is_landscape = img_width > img_height
 
-        # Determine paper dimensions for printing
-        if img_is_landscape:
-            # Landscape: rotate paper orientation
-            paper_w = self.paper_height_px
-            paper_h = self.paper_width_px
-        else:
-            # Portrait
-            paper_w = self.paper_width_px
-            paper_h = self.paper_height_px
+        # Always create portrait canvas (4"x6" = 1200x1800px)
+        # This matches the printer's portrait orientation requirement
+        paper_w = self.paper_width_px   # 1200
+        paper_h = self.paper_height_px  # 1800
 
         # Create print pixmap
         print_pixmap = QPixmap(paper_w, paper_h)
@@ -350,37 +370,50 @@ class PhotoPreview(QLabel):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
+        # For landscape images, rotate the canvas 90° so we can draw the landscape image
+        # Then we'll rotate the final pixmap back to portrait
+        working_paper_w = paper_w
+        working_paper_h = paper_h
+
+        if img_is_landscape:
+            # Rotate canvas to landscape orientation for drawing
+            painter.translate(paper_w / 2, paper_h / 2)
+            painter.rotate(90)
+            painter.translate(-paper_h / 2, -paper_w / 2)
+            # Swap dimensions for calculations
+            working_paper_w, working_paper_h = paper_h, paper_w
+
         # Calculate scaling based on mode
         img_aspect = img_width / img_height
-        paper_aspect = paper_w / paper_h
+        paper_aspect = working_paper_w / working_paper_h
 
         if self.scale_mode == 'fill':
             # Fill mode: crop to fill paper completely
             if img_aspect > paper_aspect:
-                scale = paper_h / img_height
+                scale = working_paper_h / img_height
                 scaled_w = int(img_width * scale)
-                scaled_h = paper_h
-                x_offset = (paper_w - scaled_w) // 2
+                scaled_h = working_paper_h
+                x_offset = (working_paper_w - scaled_w) // 2
                 y_offset = 0
             else:
-                scale = paper_w / img_width
-                scaled_w = paper_w
+                scale = working_paper_w / img_width
+                scaled_w = working_paper_w
                 scaled_h = int(img_height * scale)
                 x_offset = 0
-                y_offset = (paper_h - scaled_h) // 2
+                y_offset = (working_paper_h - scaled_h) // 2
         else:  # fit mode
             # Fit mode: scale to fit with borders
             if img_aspect > paper_aspect:
-                scale = paper_w / img_width
-                scaled_w = paper_w
+                scale = working_paper_w / img_width
+                scaled_w = working_paper_w
                 scaled_h = int(img_height * scale)
                 x_offset = 0
-                y_offset = (paper_h - scaled_h) // 2
+                y_offset = (working_paper_h - scaled_h) // 2
             else:
-                scale = paper_h / img_height
+                scale = working_paper_h / img_height
                 scaled_w = int(img_width * scale)
-                scaled_h = paper_h
-                x_offset = (paper_w - scaled_w) // 2
+                scaled_h = working_paper_h
+                x_offset = (working_paper_w - scaled_w) // 2
                 y_offset = 0
 
         painter.drawPixmap(x_offset, y_offset, scaled_w, scaled_h, self.original_image)
@@ -510,6 +543,48 @@ class PhotoPrintWindow(QMainWindow):
 
         controls_layout.addWidget(printer_group)
 
+        # Printer settings group
+        settings_group = QWidget()
+        settings_layout = QVBoxLayout(settings_group)
+        settings_layout.setContentsMargins(20, 0, 0, 0)  # Indent settings
+        settings_layout.setSpacing(5)
+
+        # Force portrait checkbox
+        self.force_portrait_check = QCheckBox(self.translations.get('force_portrait'))
+        self.force_portrait_check.setToolTip(self.translations.get('force_portrait_tooltip'))
+        self.force_portrait_check.setChecked(self.config.get('force_portrait', True))
+        self.force_portrait_check.stateChanged.connect(self.on_force_portrait_changed)
+        settings_layout.addWidget(self.force_portrait_check)
+
+        # Paper source selection
+        paper_source_widget = QWidget()
+        paper_source_layout = QHBoxLayout(paper_source_widget)
+        paper_source_layout.setContentsMargins(0, 0, 0, 0)
+
+        paper_source_label = QLabel(self.translations.get('paper_source'))
+        paper_source_layout.addWidget(paper_source_label)
+
+        self.paper_source_combo = QComboBox()
+        self.paper_source_combo.addItem(self.translations.get('paper_source_auto'), 'auto')
+        self.paper_source_combo.addItem(self.translations.get('paper_source_rear'), 'rear')
+        self.paper_source_combo.addItem(self.translations.get('paper_source_front'), 'front')
+        self.paper_source_combo.addItem(self.translations.get('paper_source_top'), 'top')
+
+        # Set current paper source
+        current_source = self.config.get('paper_source', 'auto')
+        for i in range(self.paper_source_combo.count()):
+            if self.paper_source_combo.itemData(i) == current_source:
+                self.paper_source_combo.setCurrentIndex(i)
+                break
+
+        self.paper_source_combo.currentIndexChanged.connect(self.on_paper_source_changed)
+        paper_source_layout.addWidget(self.paper_source_combo)
+        paper_source_layout.addStretch()
+
+        settings_layout.addWidget(paper_source_widget)
+
+        controls_layout.addWidget(settings_group)
+
         # Info label
         self.info_label = QLabel(self.translations.get('info_text'))
         self.info_label.setStyleSheet("color: #666; font-size: 11px;")
@@ -583,6 +658,16 @@ class PhotoPrintWindow(QMainWindow):
             self.config.set('language', lang_code)
             self.update_ui_texts()
 
+    def on_force_portrait_changed(self, state):
+        """Handle force portrait checkbox change"""
+        self.config.set('force_portrait', state == Qt.Checked)
+
+    def on_paper_source_changed(self):
+        """Handle paper source combo box change"""
+        paper_source = self.paper_source_combo.currentData()
+        if paper_source:
+            self.config.set('paper_source', paper_source)
+
     def update_ui_texts(self):
         """Update all UI texts with current language"""
         self.setWindowTitle(self.translations.get('window_title'))
@@ -602,6 +687,22 @@ class PhotoPrintWindow(QMainWindow):
         self.fill_radio.setToolTip(self.translations.get('fill_tooltip'))
         self.fit_radio.setText(self.translations.get('fit_mode'))
         self.fit_radio.setToolTip(self.translations.get('fit_tooltip'))
+
+        # Update printer settings checkbox
+        self.force_portrait_check.setText(self.translations.get('force_portrait'))
+        self.force_portrait_check.setToolTip(self.translations.get('force_portrait_tooltip'))
+
+        # Update paper source combo box items
+        for i in range(self.paper_source_combo.count()):
+            source_key = self.paper_source_combo.itemData(i)
+            if source_key == 'auto':
+                self.paper_source_combo.setItemText(i, self.translations.get('paper_source_auto'))
+            elif source_key == 'rear':
+                self.paper_source_combo.setItemText(i, self.translations.get('paper_source_rear'))
+            elif source_key == 'front':
+                self.paper_source_combo.setItemText(i, self.translations.get('paper_source_front'))
+            elif source_key == 'top':
+                self.paper_source_combo.setItemText(i, self.translations.get('paper_source_top'))
 
         # Update info label
         self.info_label.setText(self.translations.get('info_text'))
@@ -653,13 +754,39 @@ class PhotoPrintWindow(QMainWindow):
         printer.setPageSizeMM(QSizeF(101.6, 152.4))  # 4x6 inches in mm
         printer.setFullPage(True)  # Borderless
 
-        # Set orientation based on image
-        img_width = self.preview.original_image.width()
-        img_height = self.preview.original_image.height()
-        if img_width > img_height:
-            printer.setOrientation(QPrinter.Landscape)
-        else:
+        # Set orientation
+        # Canon PIXMA printers REQUIRE portrait orientation as paper is inserted portrait in rear tray
+        # The image rotation is handled in get_print_pixmap(), not by printer orientation
+        if self.config.get('force_portrait', True):
+            # Always portrait for Canon PIXMA compatibility
             printer.setOrientation(QPrinter.Portrait)
+        else:
+            # Legacy behavior: set orientation based on image
+            img_width = self.preview.original_image.width()
+            img_height = self.preview.original_image.height()
+            if img_width > img_height:
+                printer.setOrientation(QPrinter.Landscape)
+            else:
+                printer.setOrientation(QPrinter.Portrait)
+
+        # Set paper source if specified (for rear tray on Canon PIXMA)
+        paper_source = self.config.get('paper_source', 'auto')
+        if paper_source != 'auto':
+            # Try to set paper source via CUPS options
+            # Note: This may not work on all printer drivers
+            try:
+                from PyQt5.QtPrintSupport import QPrinterInfo
+                if hasattr(printer, 'setPaperSource'):
+                    # Map source names to QPrinter constants
+                    source_map = {
+                        'rear': QPrinter.Manual,
+                        'front': QPrinter.Auto,
+                        'top': QPrinter.Upper,
+                    }
+                    if paper_source in source_map:
+                        printer.setPaperSource(source_map[paper_source])
+            except Exception:
+                pass  # Silently fail if not supported
 
         # Show print dialog
         dialog = QPrintDialog(printer, self)

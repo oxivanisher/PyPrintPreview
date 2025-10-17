@@ -10,107 +10,88 @@ A Python GUI application for previewing and printing photos on 4x6" glossy paper
   - **Fill Mode**: Crops image to completely fill the 4x6" paper (no borders)
   - **Fit Mode**: Scales image to fit within paper (may have white borders)
 - **EXIF Support**: Automatically rotates images based on EXIF orientation data
-- **Saved Preferences**: Remembers your printer selection and preferred scaling mode
+- **Saved Preferences**: Remembers your printer selection, scaling mode, and printer settings
+- **Canon PIXMA Support**: Special handling for Canon PIXMA printers with configurable orientation and paper source
 - **Borderless Printing**: Configured for 4x6" borderless photo printing
-- **Canon Inkjet Support**: Works with Canon photo printers and other compatible printers
+- **Multilingual**: English and German interface with automatic language detection
 
 ## Installation on Linux Mint 22.2
 
-### 1. Install Dependencies
+### Quick Install (Recommended)
+
+The easiest way to install PyPrintPreview is to use the automated installer, which will:
+- Install all dependencies
+- Copy files to `/opt/PyPrintPreview`
+- Set up desktop integration and Nemo context menu
+- Create a symlink for command-line access
 
 ```bash
-# Install Python and pip if not already installed
-sudo apt update
-sudo apt install python3 python3-pip python3-pyqt5 python3-pil
-
-# Or install via pip (recommended for latest versions)
-pip3 install -r requirements.txt
+cd /path/to/PyPrintPreview
+sudo ./dist/install.sh
 ```
 
-### 2. Make the Script Executable
+After installation, you can run:
+```bash
+pyprintpreview /path/to/your/photo.jpg
+```
 
+### Manual Installation
+
+If you prefer to run from the source directory:
+
+1. **Install Dependencies**
+```bash
+sudo apt update
+sudo apt install python3 python3-pip python3-pyqt5 python3-pil
+```
+
+2. **Make the Script Executable**
 ```bash
 chmod +x pyprintpreview.py
 ```
 
-### 3. Test the Script
-
+3. **Test the Script**
 ```bash
 python3 pyprintpreview.py /path/to/your/photo.jpg
 ```
 
 ## Integration with Nemo File Browser
 
-### Method 1: Add to Context Menu (Right-Click Menu)
+**Note:** If you used the automated installer (`dist/install.sh`), desktop integration is already set up system-wide and you can skip this section.
 
-1. Create the Nemo actions directory if it doesn't exist:
+### Manual Integration
+
+For manual installations or per-user configuration:
+
+#### Context Menu (Right-Click Menu)
+
+Copy the Nemo action file to your user directory:
 ```bash
 mkdir -p ~/.local/share/nemo/actions
+cp dist/print-photo.nemo_action ~/.local/share/nemo/actions/
 ```
 
-2. Create a new action file:
+If running from a custom location (not `/opt/PyPrintPreview`), edit the file to update the path:
 ```bash
 nano ~/.local/share/nemo/actions/print-photo.nemo_action
+# Change the Exec= line to point to your pyprintpreview.py location
 ```
 
-3. Add the following content (adjust the path to your script):
-```ini
-[Nemo Action]
-Name=Print Photo (4x6")
-Comment=Preview and print photo on 4x6" glossy paper
-Exec=python3 /home/YOUR_USERNAME/Documents/dev/PycharmProjects/PyPrintPreview/pyprintpreview.py %F
-Icon-Name=printer
-Selection=s
-Extensions=jpg;jpeg;png;bmp;gif;tiff;webp;
-```
-
-4. Replace `/home/YOUR_USERNAME/` with your actual home directory path:
-```bash
-sed -i "s|/home/YOUR_USERNAME/|$HOME/|g" ~/.local/share/nemo/actions/print-photo.nemo_action
-```
-
-5. Restart Nemo:
+Restart Nemo:
 ```bash
 nemo -q
 ```
 
-Now when you right-click on any image file in Nemo, you'll see "Print Photo (4x6")" in the context menu.
+#### Desktop Entry (Open With / Default Application)
 
-### Method 2: Set as Default Application for Images
-
-1. Create a desktop entry:
+Copy the desktop entry file:
 ```bash
 mkdir -p ~/.local/share/applications
-nano ~/.local/share/applications/pyprintpreview.desktop
-```
-
-2. Add the following content:
-```ini
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Photo Print Preview
-Comment=Preview and print photos on 4x6" glossy paper
-Exec=python3 /home/YOUR_USERNAME/Documents/dev/PycharmProjects/PyPrintPreview/pyprintpreview.py %f
-Icon=printer
-Terminal=false
-Categories=Graphics;Photography;Printing;
-MimeType=image/jpeg;image/png;image/bmp;image/gif;image/tiff;image/webp;
-```
-
-3. Replace the path with your actual path:
-```bash
-sed -i "s|/home/YOUR_USERNAME/|$HOME/|g" ~/.local/share/applications/pyprintpreview.desktop
-```
-
-4. Update desktop database:
-```bash
+cp dist/pyprintpreview.desktop ~/.local/share/applications/
 update-desktop-database ~/.local/share/applications
 ```
 
-5. Now you can right-click any image → "Open With" → "Photo Print Preview"
-
-To set it as the default application for images:
+To set as default application for images:
 ```bash
 xdg-mime default pyprintpreview.desktop image/jpeg
 xdg-mime default pyprintpreview.desktop image/png
@@ -144,7 +125,24 @@ The application saves your preferences in:
 This includes:
 - Last selected printer
 - Preferred scaling mode (fill/fit)
+- Force portrait orientation setting (for Canon PIXMA compatibility)
+- Paper source selection (rear/front tray)
+- Language preference (English/German)
 - Paper size settings
+
+Example configuration:
+```json
+{
+  "printer_name": "Canon-PIXMA-TS3400",
+  "last_scale_mode": "fill",
+  "paper_size": "4x6",
+  "borderless": true,
+  "quality": "high",
+  "language": "en",
+  "force_portrait": true,
+  "paper_source": "rear"
+}
+```
 
 ## Scaling Modes Explained
 
@@ -175,26 +173,121 @@ These settings should be remembered by the system for future prints.
 
 ## Troubleshooting
 
-### Script doesn't run
+### Canon PIXMA Printer Issues
+
+#### Landscape photos print incorrectly or print on the drum
+
+**Solution:** Make sure the **"Always use portrait orientation (Canon PIXMA)"** checkbox is **checked** in the application (this is the default setting).
+
+Canon PIXMA printers require:
+- Photo paper inserted in **portrait mode** in the rear tray
+- Print jobs sent in **portrait orientation** (even for landscape photos)
+- The application handles image rotation internally
+
+If you've unchecked this option, re-enable it and try printing again.
+
+#### Printer shows "Wrong paper size" warning
+
+The printer is expecting a different paper configuration. Try these steps:
+
+1. **Check CUPS printer settings:**
+   ```bash
+   lpstat -p -d
+   lpoptions -p YourCanonPrinterName -l | grep PageSize
+   ```
+
+2. **Set paper size explicitly in CUPS:**
+   ```bash
+   # For 4x6" paper (102x152mm)
+   lpoptions -p YourCanonPrinterName -o media=w288h432
+   # Or try these Canon-specific sizes:
+   lpoptions -p YourCanonPrinterName -o PageSize=w288h432
+   lpoptions -p YourCanonPrinterName -o PageSize=4x6
+   ```
+
+3. **Specify rear tray as paper source:**
+
+   In the application, use the **"Paper Source"** dropdown and select **"Rear Tray"**.
+
+   Or set it via CUPS:
+   ```bash
+   lpoptions -p YourCanonPrinterName -o InputSlot=Rear
+   # Some Canon drivers use:
+   lpoptions -p YourCanonPrinterName -o InputSlot=RearTray
+   ```
+
+4. **Check Canon driver settings:**
+   ```bash
+   # View all available options for your printer
+   lpoptions -p YourCanonPrinterName -l
+
+   # Look for media type options
+   lpoptions -p YourCanonPrinterName -o MediaType=PhotopaperPro
+   # or
+   lpoptions -p YourCanonPrinterName -o MediaType=Glossy
+   ```
+
+5. **Reset printer configuration:**
+   ```bash
+   # Remove all custom options
+   lpoptions -p YourCanonPrinterName -r media
+   lpoptions -p YourCanonPrinterName -r PageSize
+   lpoptions -p YourCanonPrinterName -r InputSlot
+
+   # Then set them fresh
+   lpoptions -p YourCanonPrinterName -o PageSize=4x6
+   lpoptions -p YourCanonPrinterName -o InputSlot=Rear
+   ```
+
+6. **Use the print dialog settings:**
+
+   When the print dialog opens:
+   - Click "Properties" or "Preferences"
+   - Manually select "4x6" or "101.6 x 152.4 mm" paper size
+   - Select "Photo Paper Pro Platinum" or "Glossy Photo Paper" as media type
+   - Enable "Borderless" if available
+   - These settings should persist for future prints
+
+#### Still having issues?
+
+Check your configuration file at `~/.config/pyprintpreview/settings.json`:
+
+```bash
+cat ~/.config/pyprintpreview/settings.json
+```
+
+It should contain:
+```json
+{
+  "force_portrait": true,
+  "paper_source": "auto"
+}
+```
+
+If `force_portrait` is `false`, change it to `true` or delete the file to reset to defaults.
+
+### General Troubleshooting
+
+#### Script doesn't run
 - Make sure it's executable: `chmod +x pyprintpreview.py`
 - Check Python version: `python3 --version` (should be 3.6+)
 - Verify dependencies: `pip3 list | grep -E "PyQt5|Pillow"`
 
-### Image appears rotated incorrectly
+#### Image appears rotated incorrectly
 - The script reads EXIF orientation data automatically
 - If still incorrect, try opening the image in an image editor and saving it again
 
-### Print is too small/large
+#### Print is too small/large
 - Make sure your printer is set to 4x6" paper size
 - Check "Fit to page" is NOT selected in printer dialog
 - Use "Actual Size" or "100%" scaling in printer settings
 
-### Context menu doesn't appear
+#### Context menu doesn't appear
 - Make sure the .nemo_action file is in the correct directory
 - Restart Nemo: `nemo -q`
 - Check file has correct permissions: `ls -l ~/.local/share/nemo/actions/`
 
-### PyQt5 import errors
+#### PyQt5 import errors
 - Try installing system package: `sudo apt install python3-pyqt5`
 - Or use pip: `pip3 install PyQt5`
 

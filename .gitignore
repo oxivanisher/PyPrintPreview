@@ -1,3 +1,7 @@
 venv
 .venv
 *.pdf
+__pycache__/
+*.pyc
+*.pyo
+.idea/
