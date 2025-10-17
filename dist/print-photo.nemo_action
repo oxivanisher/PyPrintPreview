@@ -1,0 +1,7 @@
+[Nemo Action]
+Name=Print Photo (4x6")
+Comment=Preview and print photo on 4x6" glossy paper
+Exec=/opt/PyPrintPreview/pyprintpreview.py %F
+Icon-Name=printer
+Selection=s
+Extensions=jpg;jpeg;png;bmp;gif;tiff;webp;
