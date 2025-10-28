@@ -2,6 +2,10 @@
 
 A Python GUI application for previewing and printing photos on 4x6" glossy paper with proper formatting and orientation handling.
 
+## Attention - Vibe Coded
+
+Please be aware, that this application is (almost) completely vibe-coded. It works in my use case and the code seemed sensible to me but ... you have been warned.
+
 ## Features
 
 - **GUI Preview**: See exactly how your photo will print before printing
