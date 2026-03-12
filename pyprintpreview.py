@@ -8,6 +8,7 @@ import sys
 import os
 import json
 import locale
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +29,19 @@ try:
 except ImportError:
     print("Error: Pillow is required. Install with: pip install Pillow")
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Logging — writes to /tmp/pyprintpreview.log, appending each run.
+# ---------------------------------------------------------------------------
+log = logging.getLogger("pyprintpreview")
+log.setLevel(logging.DEBUG)
+_fh = logging.FileHandler("/tmp/pyprintpreview.log")
+_fh.setFormatter(logging.Formatter(
+    "%(asctime)s  %(levelname)-7s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+log.addHandler(_fh)
 
 
 class Translations:
@@ -207,15 +221,26 @@ class PhotoPreview(QLabel):
     def load_image(self, image_path: str) -> bool:
         """Load an image and determine its orientation"""
         try:
+            log.info("Loading image: %s", image_path)
+
             # Load with PIL to get EXIF orientation
             pil_image = Image.open(image_path)
+            log.debug("Image opened — size: %dx%d, mode: %s",
+                      pil_image.width, pil_image.height, pil_image.mode)
 
             # Handle EXIF orientation
             try:
                 from PIL import ImageOps
+                before = (pil_image.width, pil_image.height)
                 pil_image = ImageOps.exif_transpose(pil_image)
+                after = (pil_image.width, pil_image.height)
+                if before != after:
+                    log.info("EXIF transpose applied: %dx%d → %dx%d",
+                             before[0], before[1], after[0], after[1])
+                else:
+                    log.debug("EXIF transpose: no rotation needed")
             except Exception:
-                pass
+                log.warning("EXIF transpose failed — using image as-is")
 
             # Convert PIL to QImage
             pil_image = pil_image.convert('RGB')
@@ -224,10 +249,14 @@ class PhotoPreview(QLabel):
                            pil_image.width * 3, QImage.Format_RGB888)
 
             self.original_image = QPixmap.fromImage(qimage)
+            orientation = "landscape" if pil_image.width > pil_image.height else "portrait"
+            log.info("Image loaded — final size: %dx%d (%s)",
+                     pil_image.width, pil_image.height, orientation)
             self.update_preview()
             return True
 
         except Exception as e:
+            log.error("Failed to load image: %s", e)
             error_title = self.translations.get('error') if self.translations else "Error"
             error_msg = self.translations.get('load_error') if self.translations else "Could not load image:"
             QMessageBox.critical(self, error_title, f"{error_msg}\n{str(e)}")
@@ -742,18 +771,37 @@ class PhotoPrintWindow(QMainWindow):
         target_h = 152.4  # mm (6 inches)
         tolerance = 3.0   # mm
 
+        log.info("Querying page sizes for printer: %s", printer_name)
         try:
             info = QPrinterInfo.printerInfo(printer_name)
-            for ps in info.supportedPageSizes():
+            supported = info.supportedPageSizes()
+
+            if not supported:
+                log.warning("Printer reported no supported page sizes (generic driver?)")
+            else:
+                log.debug("Printer supports %d page size(s):", len(supported))
+                for ps in supported:
+                    s = ps.size(QPageSize.Millimeter)
+                    log.debug("  %-30s  %.1f x %.1f mm  (key: %s)",
+                              ps.name(), s.width(), s.height(), ps.key())
+
+            for ps in supported:
                 size = ps.size(QPageSize.Millimeter)
                 w, h = size.width(), size.height()
                 if (abs(w - target_w) <= tolerance and abs(h - target_h) <= tolerance) or \
                    (abs(w - target_h) <= tolerance and abs(h - target_w) <= tolerance):
+                    log.info("Matched page size: '%s' (key: %s, %.1f x %.1f mm)",
+                             ps.name(), ps.key(), w, h)
                     return ps
-        except Exception:
-            pass
 
-        return QPageSize(QSizeF(4.0, 6.0), QPageSize.Inch, "4x6in")
+            log.warning("No matching 4x6\" page size found in printer PPD — using fallback 'w288h432'")
+        except Exception as e:
+            log.error("Error querying printer page sizes: %s", e)
+
+        fallback = QPageSize(QSizeF(4.0, 6.0), QPageSize.Inch, "4x6in")
+        log.info("Using fallback page size: name='%s', key='%s'",
+                 fallback.name(), fallback.key())
+        return fallback
 
     def print_image(self):
         """Print the image with current settings"""
@@ -785,26 +833,25 @@ class PhotoPrintWindow(QMainWindow):
         # Canon PIXMA printers REQUIRE portrait orientation as paper is inserted portrait in rear tray
         # The image rotation is handled in get_print_pixmap(), not by printer orientation
         if self.config.get('force_portrait', True):
-            # Always portrait for Canon PIXMA compatibility
             printer.setOrientation(QPrinter.Portrait)
+            log.info("Orientation: Portrait (force_portrait enabled)")
         else:
-            # Legacy behavior: set orientation based on image
             img_width = self.preview.original_image.width()
             img_height = self.preview.original_image.height()
             if img_width > img_height:
                 printer.setOrientation(QPrinter.Landscape)
+                log.info("Orientation: Landscape (image is %dx%d)", img_width, img_height)
             else:
                 printer.setOrientation(QPrinter.Portrait)
+                log.info("Orientation: Portrait (image is %dx%d)", img_width, img_height)
 
         # Set paper source if specified (for rear tray on Canon PIXMA)
         paper_source = self.config.get('paper_source', 'auto')
+        log.info("Paper source setting: %s", paper_source)
         if paper_source != 'auto':
-            # Try to set paper source via CUPS options
-            # Note: This may not work on all printer drivers
             try:
                 from PyQt5.QtPrintSupport import QPrinterInfo
                 if hasattr(printer, 'setPaperSource'):
-                    # Map source names to QPrinter constants
                     source_map = {
                         'rear': QPrinter.Manual,
                         'front': QPrinter.Auto,
@@ -812,36 +859,44 @@ class PhotoPrintWindow(QMainWindow):
                     }
                     if paper_source in source_map:
                         printer.setPaperSource(source_map[paper_source])
-            except Exception:
-                pass  # Silently fail if not supported
+                        log.info("Paper source set via setPaperSource: %s", paper_source)
+                    else:
+                        log.warning("Unknown paper source value: %s", paper_source)
+            except Exception as e:
+                log.warning("setPaperSource failed: %s", e)
 
-        # Show print dialog
+        log.info("Opening print dialog")
         dialog = QPrintDialog(printer, self)
         dialog.setWindowTitle(self.translations.get('print_photo'))
 
         if dialog.exec_() == QPrintDialog.Accepted:
-            # Get print-ready pixmap
+            log.info("Print dialog accepted — sending job to printer")
             pixmap = self.preview.get_print_pixmap()
 
             if pixmap:
                 painter = QPainter(printer)
-
-                # Get printer page rect
                 page_rect = printer.pageRect(QPrinter.DevicePixel)
-
-                # Draw the pixmap to fill the page
+                log.info("Page rect (device pixels): %dx%d",
+                         page_rect.width(), page_rect.height())
                 painter.drawPixmap(page_rect.toRect(), pixmap)
                 painter.end()
+                log.info("Print job sent successfully")
 
                 QMessageBox.information(self, self.translations.get('success'),
                                       self.translations.get('print_success'))
             else:
+                log.error("get_print_pixmap() returned None — print aborted")
                 QMessageBox.critical(self, self.translations.get('error'),
                                    self.translations.get('print_error'))
+        else:
+            log.info("Print dialog cancelled by user")
 
 
 def main():
     """Main entry point"""
+    log.info("=" * 60)
+    log.info("PyPrintPreview starting  (args: %s)", sys.argv[1:])
+
     app = QApplication(sys.argv)
 
     # Get image path from command line if provided
@@ -849,13 +904,29 @@ def main():
     if len(sys.argv) > 1:
         image_path = sys.argv[1]
         if not os.path.exists(image_path):
+            log.error("File not found: %s", image_path)
             print(f"Error: File not found: {image_path}")
             sys.exit(1)
 
+    # Log available printers
+    printers = QPrinterInfo.availablePrinters()
+    default = QPrinterInfo.defaultPrinter()
+    log.info("Available printers (%d):", len(printers))
+    for p in printers:
+        marker = " [default]" if p.printerName() == default.printerName() else ""
+        log.info("  %s%s", p.printerName(), marker)
+
     window = PhotoPrintWindow(image_path)
+    log.info("Language: %s, scale mode: %s, force_portrait: %s, paper_source: %s",
+             window.translations.get_current_language(),
+             window.config.get('last_scale_mode'),
+             window.config.get('force_portrait'),
+             window.config.get('paper_source'))
     window.show()
 
-    sys.exit(app.exec_())
+    exit_code = app.exec_()
+    log.info("PyPrintPreview exiting (code %d)", exit_code)
+    sys.exit(exit_code)
 
 
 if __name__ == '__main__':
