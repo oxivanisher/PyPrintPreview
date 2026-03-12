@@ -17,7 +17,7 @@ try:
                                  QButtonGroup, QComboBox, QMessageBox, QFileDialog,
                                  QCheckBox)
     from PyQt5.QtCore import Qt, QSizeF
-    from PyQt5.QtGui import QPixmap, QPainter, QImage
+    from PyQt5.QtGui import QPixmap, QPainter, QImage, QPageSize
     from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPrinterInfo
 except ImportError:
     print("Error: PyQt5 is required. Install with: pip install PyQt5")
@@ -750,8 +750,10 @@ class PhotoPrintWindow(QMainWindow):
             printer.setPrinterName(printer_name)
 
         # Configure for 4x6" photo paper
-        printer.setPageSize(QPrinter.Custom)
-        printer.setPageSizeMM(QSizeF(101.6, 152.4))  # 4x6 inches in mm
+        # Use a named page size ("4x6in") so CUPS passes a recognized paper name
+        # to the printer — avoids the "wrong paper" mismatch warning.
+        page_size = QPageSize(QSizeF(4.0, 6.0), QPageSize.Inch, "4x6in")
+        printer.setPageSize(page_size)
         printer.setFullPage(True)  # Borderless
 
         # Set orientation
