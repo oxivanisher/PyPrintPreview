@@ -730,6 +730,31 @@ class PhotoPrintWindow(QMainWindow):
             self.print_button.setEnabled(True)
             self.setWindowTitle(f"{self.translations.get('window_title')} - {os.path.basename(image_path)}")
 
+    def _find_4x6_page_size(self, printer_name: str) -> 'QPageSize':
+        """Return the printer's native QPageSize for 4x6" paper.
+
+        Queries the printer's PPD via QPrinterInfo.supportedPageSizes() and
+        returns the first entry whose physical dimensions match 4x6" within a
+        small tolerance.  Falls back to a generic named QPageSize("4x6in") if
+        nothing matches (e.g. generic CUPS driver with no PPD size list).
+        """
+        target_w = 101.6  # mm (4 inches)
+        target_h = 152.4  # mm (6 inches)
+        tolerance = 3.0   # mm
+
+        try:
+            info = QPrinterInfo.printerInfo(printer_name)
+            for ps in info.supportedPageSizes():
+                size = ps.size(QPageSize.Millimeter)
+                w, h = size.width(), size.height()
+                if (abs(w - target_w) <= tolerance and abs(h - target_h) <= tolerance) or \
+                   (abs(w - target_h) <= tolerance and abs(h - target_w) <= tolerance):
+                    return ps
+        except Exception:
+            pass
+
+        return QPageSize(QSizeF(4.0, 6.0), QPageSize.Inch, "4x6in")
+
     def print_image(self):
         """Print the image with current settings"""
         if not self.preview.original_image:
@@ -749,10 +774,10 @@ class PhotoPrintWindow(QMainWindow):
         if printer_name:
             printer.setPrinterName(printer_name)
 
-        # Configure for 4x6" photo paper
-        # Use a named page size ("4x6in") so CUPS passes a recognized paper name
-        # to the printer — avoids the "wrong paper" mismatch warning.
-        page_size = QPageSize(QSizeF(4.0, 6.0), QPageSize.Inch, "4x6in")
+        # Configure for 4x6" photo paper.
+        # Auto-detect the printer's native page size name from its PPD so CUPS
+        # passes a name the printer recognises — avoids the paper mismatch prompt.
+        page_size = self._find_4x6_page_size(printer_name)
         printer.setPageSize(page_size)
         printer.setFullPage(True)  # Borderless
 
