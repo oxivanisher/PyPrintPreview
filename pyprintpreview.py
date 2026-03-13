@@ -6,7 +6,6 @@ Supports fill (crop) and fit (border) modes with automatic orientation detection
 
 import sys
 import os
-import io
 import json
 import locale
 import logging
@@ -20,7 +19,7 @@ try:
                                  QHBoxLayout, QPushButton, QLabel, QRadioButton,
                                  QButtonGroup, QComboBox, QMessageBox, QFileDialog,
                                  QCheckBox)
-    from PyQt5.QtCore import Qt, QSizeF, QBuffer, QByteArray, QIODevice
+    from PyQt5.QtCore import Qt, QSizeF
     from PyQt5.QtGui import QPixmap, QPainter, QImage, QPageSize
     from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPrinterInfo
 except ImportError:
@@ -929,71 +928,72 @@ class PhotoPrintWindow(QMainWindow):
         copies = printer.numCopies()
         log.info("Print dialog accepted — printer='%s', copies=%d", final_printer, copies)
 
-        # Generate print-ready pixmap (1200x1800px portrait canvas, 300 DPI).
-        pixmap = self.preview.get_print_pixmap()
-        if not pixmap:
-            log.error("get_print_pixmap() returned None — print aborted")
-            QMessageBox.critical(self, self.translations.get('error'),
-                               self.translations.get('print_error'))
-            return
-
-        # Convert QPixmap → PNG bytes via PIL so we can embed 300 DPI metadata.
-        # CUPS needs the DPI to map the pixel dimensions to physical paper size.
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.WriteOnly)
-        pixmap.save(buf, "PNG")
-        buf.close()
-        pil_img = Image.open(io.BytesIO(bytes(ba)))
-        pil_img.load()
-
-        fd, temp_path = tempfile.mkstemp(suffix='.png', prefix='pyprintpreview_')
-        os.close(fd)
         try:
-            pil_img.save(temp_path, "PNG", dpi=(300, 300))
-            log.info("Saved print image to temp file: %s (300 DPI)", temp_path)
-
-            # Determine the correct page size key from the printer's PPD.
-            page_size = self._find_4x6_page_size(final_printer)
-
-            # Build the lp command with explicit CUPS options.
-            cmd = ['lp', '-d', final_printer, '-n', str(copies),
-                   '-o', f'media={page_size.key()}']
-
-            media_type = self.media_type_combo.currentData()
-            if media_type:
-                cmd += ['-o', f'MediaType={media_type}']
-                log.info("MediaType: %s", media_type)
-            else:
-                log.info("MediaType: not set (printer will use its default)")
-
-            paper_source = self.config.get('paper_source', 'auto')
-            cups_source_map = {'rear': 'Rear', 'front': 'Front', 'top': 'Upper'}
-            if paper_source in cups_source_map:
-                cmd += ['-o', f'InputSlot={cups_source_map[paper_source]}']
-                log.info("InputSlot: %s", cups_source_map[paper_source])
-            else:
-                log.info("InputSlot: not set (paper source = %s)", paper_source)
-
-            cmd.append(temp_path)
-            log.info("Submitting via lp: %s", ' '.join(cmd))
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-            if result.returncode == 0:
-                log.info("lp submitted successfully: %s", result.stdout.strip())
-                QMessageBox.information(self, self.translations.get('success'),
-                                      self.translations.get('print_success'))
-            else:
-                log.error("lp failed (exit %d): %s", result.returncode, result.stderr.strip())
+            # Generate print-ready pixmap (1200x1800px portrait canvas).
+            pixmap = self.preview.get_print_pixmap()
+            if not pixmap:
+                log.error("get_print_pixmap() returned None — print aborted")
                 QMessageBox.critical(self, self.translations.get('error'),
-                                   f"{self.translations.get('print_error')}\n{result.stderr.strip()}")
-        finally:
+                                   self.translations.get('print_error'))
+                return
+
+            # Save directly to a temp PNG file.
+            # We pass '-o ppi=300' to lp so CUPS knows the resolution and maps
+            # the 1200x1800 px image correctly onto 4x6" paper.
+            fd, temp_path = tempfile.mkstemp(suffix='.png', prefix='pyprintpreview_')
+            os.close(fd)
             try:
-                os.unlink(temp_path)
-                log.debug("Temp file removed: %s", temp_path)
-            except Exception:
-                pass
+                if not pixmap.save(temp_path, "PNG"):
+                    raise RuntimeError("QPixmap.save() returned False")
+                log.info("Saved print image to temp file: %s", temp_path)
+
+                # Determine the correct page size key from the printer's PPD.
+                page_size = self._find_4x6_page_size(final_printer)
+
+                # Build the lp command with explicit CUPS options.
+                cmd = ['lp', '-d', final_printer, '-n', str(copies),
+                       '-o', f'media={page_size.key()}',
+                       '-o', 'ppi=300']
+
+                media_type = self.media_type_combo.currentData()
+                if media_type:
+                    cmd += ['-o', f'MediaType={media_type}']
+                    log.info("MediaType: %s", media_type)
+                else:
+                    log.info("MediaType: not set (printer will use its default)")
+
+                paper_source = self.config.get('paper_source', 'auto')
+                cups_source_map = {'rear': 'Rear', 'front': 'Front', 'top': 'Upper'}
+                if paper_source in cups_source_map:
+                    cmd += ['-o', f'InputSlot={cups_source_map[paper_source]}']
+                    log.info("InputSlot: %s", cups_source_map[paper_source])
+                else:
+                    log.info("InputSlot: not set (paper source = %s)", paper_source)
+
+                cmd.append(temp_path)
+                log.info("Submitting via lp: %s", ' '.join(cmd))
+
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+                if result.returncode == 0:
+                    log.info("lp submitted successfully: %s", result.stdout.strip())
+                    QMessageBox.information(self, self.translations.get('success'),
+                                          self.translations.get('print_success'))
+                else:
+                    log.error("lp failed (exit %d): %s", result.returncode, result.stderr.strip())
+                    QMessageBox.critical(self, self.translations.get('error'),
+                                       f"{self.translations.get('print_error')}\n{result.stderr.strip()}")
+            finally:
+                try:
+                    os.unlink(temp_path)
+                    log.debug("Temp file removed: %s", temp_path)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            log.error("Unexpected error during print: %s", e, exc_info=True)
+            QMessageBox.critical(self, self.translations.get('error'),
+                               f"{self.translations.get('print_error')}\n{e}")
 
 
 def main():
