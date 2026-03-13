@@ -785,16 +785,26 @@ class PhotoPrintWindow(QMainWindow):
                     log.debug("  %-30s  %.1f x %.1f mm  (key: %s)",
                               ps.name(), s.width(), s.height(), ps.key())
 
+            # Two-pass: prefer the borderless variant, accept plain as fallback.
+            first_match = None
             for ps in supported:
                 size = ps.size(QPageSize.Millimeter)
                 w, h = size.width(), size.height()
                 if (abs(w - target_w) <= tolerance and abs(h - target_h) <= tolerance) or \
                    (abs(w - target_h) <= tolerance and abs(h - target_w) <= tolerance):
-                    log.info("Matched page size: '%s' (key: %s, %.1f x %.1f mm)",
-                             ps.name(), ps.key(), w, h)
-                    return ps
+                    if "Borderless" in ps.key():
+                        log.info("Matched borderless page size: '%s' (key: %s, %.1f x %.1f mm)",
+                                 ps.name(), ps.key(), w, h)
+                        return ps
+                    if first_match is None:
+                        first_match = ps
 
-            log.warning("No matching 4x6\" page size found in printer PPD — using fallback 'w288h432'")
+            if first_match is not None:
+                log.warning("No borderless variant found — using non-borderless: '%s' (key: %s)",
+                            first_match.name(), first_match.key())
+                return first_match
+
+            log.warning("No matching 4x6\" page size found in printer PPD — using fallback")
         except Exception as e:
             log.error("Error querying printer page sizes: %s", e)
 
