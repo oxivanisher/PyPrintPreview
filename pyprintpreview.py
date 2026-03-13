@@ -973,7 +973,9 @@ class PhotoPrintWindow(QMainWindow):
             log.info("Print dialog cancelled by user")
             return
 
-        log.info("Print dialog accepted — sending job via QPainter")
+        final_printer = printer.printerName()
+        log.info("Print dialog accepted — printer='%s', building JPEG and submitting via lp",
+                 final_printer)
         pixmap = self.preview.get_print_pixmap()
         if not pixmap:
             log.error("get_print_pixmap() returned None — print aborted")
@@ -981,15 +983,49 @@ class PhotoPrintWindow(QMainWindow):
                                self.translations.get('print_error'))
             return
 
-        painter = QPainter(printer)
-        page_rect = printer.pageRect(QPrinter.DevicePixel)
-        log.info("Page rect (device pixels): %dx%d", page_rect.width(), page_rect.height())
-        painter.drawPixmap(page_rect.toRect(), pixmap)
-        painter.end()
-        log.info("Print job sent successfully")
+        # Save QPixmap → temp PNG → PIL re-reads → JPEG with 300 DPI metadata.
+        # JPEG is the format Canon's CUPS driver handles most reliably for photos.
+        # DPI metadata in the file tells CUPS the image is 4x6" without needing
+        # any extra scaling options.
+        import tempfile
+        fd_png, tmp_png = tempfile.mkstemp(suffix='.png', prefix='pyprintpreview_')
+        fd_jpg, tmp_jpg = tempfile.mkstemp(suffix='.jpg', prefix='pyprintpreview_')
+        os.close(fd_png)
+        os.close(fd_jpg)
+        try:
+            if not pixmap.save(tmp_png, "PNG"):
+                raise RuntimeError("QPixmap.save() failed")
+            pil_img = Image.open(tmp_png)
+            pil_img.load()
+            pil_img.save(tmp_jpg, "JPEG", quality=95, dpi=(300, 300))
+            log.info("Saved JPEG: %s  (%dx%d @ 300 DPI)", tmp_jpg, pil_img.width, pil_img.height)
 
-        QMessageBox.information(self, self.translations.get('success'),
-                              self.translations.get('print_success'))
+            cmd = ['lp', '-d', final_printer,
+                   '-o', f'media={page_size.key()}']
+            if media_type:
+                cmd += ['-o', f'MediaType={media_type}']
+            cmd.append(tmp_jpg)
+            log.info("lp command: %s", ' '.join(cmd))
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                log.info("lp submitted successfully: %s", result.stdout.strip())
+                QMessageBox.information(self, self.translations.get('success'),
+                                      self.translations.get('print_success'))
+            else:
+                log.error("lp failed (exit %d): %s", result.returncode, result.stderr.strip())
+                QMessageBox.critical(self, self.translations.get('error'),
+                                   f"{self.translations.get('print_error')}\n{result.stderr.strip()}")
+        except Exception as e:
+            log.error("Print error: %s", e, exc_info=True)
+            QMessageBox.critical(self, self.translations.get('error'),
+                               f"{self.translations.get('print_error')}\n{e}")
+        finally:
+            for f in (tmp_png, tmp_jpg):
+                try:
+                    os.unlink(f)
+                except Exception:
+                    pass
 
 
 def main():
