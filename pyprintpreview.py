@@ -10,7 +10,6 @@ import json
 import locale
 import logging
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -896,9 +895,9 @@ class PhotoPrintWindow(QMainWindow):
     def print_image(self):
         """Print the image with current settings.
 
-        Uses QPrintDialog for printer selection and copy count, then submits
-        the job via the 'lp' command so we have full control over CUPS options
-        (media type, paper source, page size) that Qt's QPrinter cannot set.
+        Uses Qt's QPainter/QPrinter for job submission (proven to work with
+        CUPS), but sets MediaType and page size as per-user CUPS defaults via
+        'lpoptions' beforehand so CUPS includes them in the job Qt submits.
         """
         if not self.preview.original_image:
             QMessageBox.warning(self, self.translations.get('no_image'),
@@ -909,11 +908,46 @@ class PhotoPrintWindow(QMainWindow):
         if printer_name:
             self.config.set('printer_name', printer_name)
 
-        # Use QPrintDialog only for confirmation and to let the user change
-        # the printer or copy count. We do NOT use Qt to submit the job.
+        # Set MediaType (and page size) as per-user CUPS defaults via lpoptions
+        # so Qt's CUPS backend includes them in the job it submits.
+        page_size = self._find_4x6_page_size(printer_name)
+        lpoptions_opts = [f'media={page_size.key()}']
+
+        media_type = self.media_type_combo.currentData()
+        if media_type:
+            lpoptions_opts.append(f'MediaType={media_type}')
+            log.info("MediaType: %s (will be set via lpoptions)", media_type)
+        else:
+            log.info("MediaType: not set (left to printer default)")
+
+        try:
+            cmd = ['lpoptions', '-p', printer_name]
+            for opt in lpoptions_opts:
+                cmd += ['-o', opt]
+            log.info("Setting CUPS user defaults: %s", ' '.join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                log.warning("lpoptions failed (exit %d): %s", result.returncode, result.stderr.strip())
+            else:
+                log.info("lpoptions: OK")
+        except Exception as e:
+            log.warning("lpoptions error: %s", e)
+
+        # Configure QPrinter.
         printer = QPrinter(QPrinter.HighResolution)
         if printer_name:
             printer.setPrinterName(printer_name)
+        printer.setPageSize(page_size)
+        printer.setFullPage(True)
+        printer.setOrientation(QPrinter.Portrait)
+        log.info("Orientation: Portrait (image rotation handled in pixmap)")
+
+        paper_source = self.config.get('paper_source', 'auto')
+        log.info("Paper source: %s", paper_source)
+        if paper_source != 'auto':
+            source_map = {'rear': QPrinter.Manual, 'front': QPrinter.Auto, 'top': QPrinter.Upper}
+            if paper_source in source_map:
+                printer.setPaperSource(source_map[paper_source])
 
         log.info("Opening print dialog")
         dialog = QPrintDialog(printer, self)
@@ -926,78 +960,23 @@ class PhotoPrintWindow(QMainWindow):
             log.info("Print dialog cancelled by user")
             return
 
-        # Read back printer/copies in case the user changed them in the dialog.
-        final_printer = printer.printerName()
-        copies = printer.numCopies()
-        log.info("Print dialog accepted — printer='%s', copies=%d", final_printer, copies)
-        log.info("Print dialog accepted — printer='%s', copies=%d", final_printer, copies)
-
-        try:
-            # Generate print-ready pixmap (1200x1800px portrait canvas).
-            pixmap = self.preview.get_print_pixmap()
-            if not pixmap:
-                log.error("get_print_pixmap() returned None — print aborted")
-                QMessageBox.critical(self, self.translations.get('error'),
-                                   self.translations.get('print_error'))
-                return
-
-            # Save directly to a temp PNG file.
-            # We pass '-o ppi=300' to lp so CUPS knows the resolution and maps
-            # the 1200x1800 px image correctly onto 4x6" paper.
-            fd, temp_path = tempfile.mkstemp(suffix='.png', prefix='pyprintpreview_')
-            os.close(fd)
-            try:
-                if not pixmap.save(temp_path, "PNG"):
-                    raise RuntimeError("QPixmap.save() returned False")
-                log.info("Saved print image to temp file: %s", temp_path)
-
-                # Determine the correct page size key from the printer's PPD.
-                page_size = self._find_4x6_page_size(final_printer)
-
-                # Build the lp command with explicit CUPS options.
-                cmd = ['lp', '-d', final_printer, '-n', str(copies),
-                       '-o', f'media={page_size.key()}',
-                       '-o', 'ppi=300']
-
-                media_type = self.media_type_combo.currentData()
-                if media_type:
-                    cmd += ['-o', f'MediaType={media_type}']
-                    log.info("MediaType: %s", media_type)
-                else:
-                    log.info("MediaType: not set (printer will use its default)")
-
-                paper_source = self.config.get('paper_source', 'auto')
-                cups_source_map = {'rear': 'Rear', 'front': 'Front', 'top': 'Upper'}
-                if paper_source in cups_source_map:
-                    cmd += ['-o', f'InputSlot={cups_source_map[paper_source]}']
-                    log.info("InputSlot: %s", cups_source_map[paper_source])
-                else:
-                    log.info("InputSlot: not set (paper source = %s)", paper_source)
-
-                cmd.append(temp_path)
-                log.info("Submitting via lp: %s", ' '.join(cmd))
-
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-                if result.returncode == 0:
-                    log.info("lp submitted successfully: %s", result.stdout.strip())
-                    QMessageBox.information(self, self.translations.get('success'),
-                                          self.translations.get('print_success'))
-                else:
-                    log.error("lp failed (exit %d): %s", result.returncode, result.stderr.strip())
-                    QMessageBox.critical(self, self.translations.get('error'),
-                                       f"{self.translations.get('print_error')}\n{result.stderr.strip()}")
-            finally:
-                try:
-                    os.unlink(temp_path)
-                    log.debug("Temp file removed: %s", temp_path)
-                except Exception:
-                    pass
-
-        except Exception as e:
-            log.error("Unexpected error during print: %s", e, exc_info=True)
+        log.info("Print dialog accepted — sending job via QPainter")
+        pixmap = self.preview.get_print_pixmap()
+        if not pixmap:
+            log.error("get_print_pixmap() returned None — print aborted")
             QMessageBox.critical(self, self.translations.get('error'),
-                               f"{self.translations.get('print_error')}\n{e}")
+                               self.translations.get('print_error'))
+            return
+
+        painter = QPainter(printer)
+        page_rect = printer.pageRect(QPrinter.DevicePixel)
+        log.info("Page rect (device pixels): %dx%d", page_rect.width(), page_rect.height())
+        painter.drawPixmap(page_rect.toRect(), pixmap)
+        painter.end()
+        log.info("Print job sent successfully")
+
+        QMessageBox.information(self, self.translations.get('success'),
+                              self.translations.get('print_success'))
 
 
 def main():
