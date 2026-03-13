@@ -6,9 +6,12 @@ Supports fill (crop) and fit (border) modes with automatic orientation detection
 
 import sys
 import os
+import io
 import json
 import locale
 import logging
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -17,7 +20,7 @@ try:
                                  QHBoxLayout, QPushButton, QLabel, QRadioButton,
                                  QButtonGroup, QComboBox, QMessageBox, QFileDialog,
                                  QCheckBox)
-    from PyQt5.QtCore import Qt, QSizeF
+    from PyQt5.QtCore import Qt, QSizeF, QBuffer, QByteArray, QIODevice
     from PyQt5.QtGui import QPixmap, QPainter, QImage, QPageSize
     from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPrinterInfo
 except ImportError:
@@ -86,6 +89,8 @@ class Translations:
             'paper_source_rear': 'Rear Tray',
             'paper_source_front': 'Front Tray',
             'paper_source_top': 'Top Tray',
+            'media_type': 'Media Type:',
+            'media_type_auto': 'Auto (not set)',
         },
         'de': {
             'window_title': 'Fotodruck-Vorschau',
@@ -120,6 +125,8 @@ class Translations:
             'paper_source_rear': 'Hinteres Fach',
             'paper_source_front': 'Vorderes Fach',
             'paper_source_top': 'Oberes Fach',
+            'media_type': 'Medientyp:',
+            'media_type_auto': 'Auto (nicht gesetzt)',
         }
     }
 
@@ -179,7 +186,8 @@ class Config:
             'quality': 'high',
             'language': None,  # None means auto-detect
             'force_portrait': True,  # Force portrait orientation for Canon PIXMA compatibility
-            'paper_source': 'auto'  # 'auto', 'rear', 'front', 'top', etc.
+            'paper_source': 'auto',  # 'auto', 'rear', 'front', 'top', etc.
+            'media_type': ''  # '' = don't set (printer decides), otherwise a PPD MediaType value
         }
 
     def save(self):
@@ -612,7 +620,28 @@ class PhotoPrintWindow(QMainWindow):
 
         settings_layout.addWidget(paper_source_widget)
 
+        # Media type selection (populated from printer PPD via lpoptions)
+        media_type_widget = QWidget()
+        media_type_layout = QHBoxLayout(media_type_widget)
+        media_type_layout.setContentsMargins(0, 0, 0, 0)
+
+        media_type_label = QLabel(self.translations.get('media_type'))
+        media_type_layout.addWidget(media_type_label)
+
+        self.media_type_combo = QComboBox()
+        self.media_type_combo.setMinimumWidth(200)
+        self.media_type_combo.currentIndexChanged.connect(self.on_media_type_changed)
+        media_type_layout.addWidget(self.media_type_combo)
+        media_type_layout.addStretch()
+
+        settings_layout.addWidget(media_type_widget)
+
         controls_layout.addWidget(settings_group)
+
+        # Populate media types for the initially selected printer and wire up
+        # the printer combo so it repopulates whenever the selection changes.
+        self.printer_combo.currentIndexChanged.connect(self.on_printer_changed)
+        self._populate_media_type_combo(self.printer_combo.currentText())
 
         # Info label
         self.info_label = QLabel(self.translations.get('info_text'))
@@ -759,6 +788,58 @@ class PhotoPrintWindow(QMainWindow):
             self.print_button.setEnabled(True)
             self.setWindowTitle(f"{self.translations.get('window_title')} - {os.path.basename(image_path)}")
 
+    def _query_media_types(self, printer_name: str) -> list:
+        """Return the list of MediaType values from the printer's PPD via lpoptions."""
+        try:
+            result = subprocess.run(
+                ['lpoptions', '-p', printer_name, '-l'],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.splitlines():
+                if line.startswith('MediaType'):
+                    # Format: "MediaType/Media Type: *Auto Plain GlossyPP2 ..."
+                    _, values_str = line.split(':', 1)
+                    values = [v.lstrip('*') for v in values_str.split()]
+                    log.debug("MediaType options for %s: %s", printer_name, values)
+                    return values
+        except Exception as e:
+            log.warning("Could not query media types via lpoptions: %s", e)
+        return []
+
+    def _populate_media_type_combo(self, printer_name: str):
+        """Populate the media type combo with values from the printer's PPD."""
+        self.media_type_combo.blockSignals(True)
+        self.media_type_combo.clear()
+        self.media_type_combo.addItem(self.translations.get('media_type_auto'), '')
+
+        media_types = self._query_media_types(printer_name)
+        for mt in media_types:
+            self.media_type_combo.addItem(mt, mt)
+
+        saved = self.config.get('media_type', '')
+        for i in range(self.media_type_combo.count()):
+            if self.media_type_combo.itemData(i) == saved:
+                self.media_type_combo.setCurrentIndex(i)
+                break
+
+        self.media_type_combo.blockSignals(False)
+        log.info("Media type combo populated for '%s': %d options, selected='%s'",
+                 printer_name, self.media_type_combo.count(),
+                 self.media_type_combo.currentData())
+
+    def on_printer_changed(self):
+        """Repopulate media type combo when the selected printer changes."""
+        printer_name = self.printer_combo.currentText()
+        log.info("Printer selection changed to: %s", printer_name)
+        self._populate_media_type_combo(printer_name)
+
+    def on_media_type_changed(self):
+        """Save the selected media type to config."""
+        media_type = self.media_type_combo.currentData()
+        if media_type is not None:
+            self.config.set('media_type', media_type)
+            log.info("Media type changed to: '%s'", media_type)
+
     def _find_4x6_page_size(self, printer_name: str) -> 'QPageSize':
         """Return the printer's native QPageSize for 4x6" paper.
 
@@ -814,92 +895,105 @@ class PhotoPrintWindow(QMainWindow):
         return fallback
 
     def print_image(self):
-        """Print the image with current settings"""
+        """Print the image with current settings.
+
+        Uses QPrintDialog for printer selection and copy count, then submits
+        the job via the 'lp' command so we have full control over CUPS options
+        (media type, paper source, page size) that Qt's QPrinter cannot set.
+        """
         if not self.preview.original_image:
             QMessageBox.warning(self, self.translations.get('no_image'),
                               self.translations.get('no_image_loaded'))
             return
 
-        # Save printer selection
         printer_name = self.printer_combo.currentText()
         if printer_name:
             self.config.set('printer_name', printer_name)
 
-        # Create printer object
+        # Use QPrintDialog only for confirmation and to let the user change
+        # the printer or copy count. We do NOT use Qt to submit the job.
         printer = QPrinter(QPrinter.HighResolution)
-
-        # Set printer by name
         if printer_name:
             printer.setPrinterName(printer_name)
-
-        # Configure for 4x6" photo paper.
-        # Auto-detect the printer's native page size name from its PPD so CUPS
-        # passes a name the printer recognises — avoids the paper mismatch prompt.
-        page_size = self._find_4x6_page_size(printer_name)
-        printer.setPageSize(page_size)
-        printer.setFullPage(True)  # Borderless
-
-        # Set orientation
-        # Canon PIXMA printers REQUIRE portrait orientation as paper is inserted portrait in rear tray
-        # The image rotation is handled in get_print_pixmap(), not by printer orientation
-        if self.config.get('force_portrait', True):
-            printer.setOrientation(QPrinter.Portrait)
-            log.info("Orientation: Portrait (force_portrait enabled)")
-        else:
-            img_width = self.preview.original_image.width()
-            img_height = self.preview.original_image.height()
-            if img_width > img_height:
-                printer.setOrientation(QPrinter.Landscape)
-                log.info("Orientation: Landscape (image is %dx%d)", img_width, img_height)
-            else:
-                printer.setOrientation(QPrinter.Portrait)
-                log.info("Orientation: Portrait (image is %dx%d)", img_width, img_height)
-
-        # Set paper source if specified (for rear tray on Canon PIXMA)
-        paper_source = self.config.get('paper_source', 'auto')
-        log.info("Paper source setting: %s", paper_source)
-        if paper_source != 'auto':
-            try:
-                from PyQt5.QtPrintSupport import QPrinterInfo
-                if hasattr(printer, 'setPaperSource'):
-                    source_map = {
-                        'rear': QPrinter.Manual,
-                        'front': QPrinter.Auto,
-                        'top': QPrinter.Upper,
-                    }
-                    if paper_source in source_map:
-                        printer.setPaperSource(source_map[paper_source])
-                        log.info("Paper source set via setPaperSource: %s", paper_source)
-                    else:
-                        log.warning("Unknown paper source value: %s", paper_source)
-            except Exception as e:
-                log.warning("setPaperSource failed: %s", e)
 
         log.info("Opening print dialog")
         dialog = QPrintDialog(printer, self)
         dialog.setWindowTitle(self.translations.get('print_photo'))
 
-        if dialog.exec_() == QPrintDialog.Accepted:
-            log.info("Print dialog accepted — sending job to printer")
-            pixmap = self.preview.get_print_pixmap()
+        if dialog.exec_() != QPrintDialog.Accepted:
+            log.info("Print dialog cancelled by user")
+            return
 
-            if pixmap:
-                painter = QPainter(printer)
-                page_rect = printer.pageRect(QPrinter.DevicePixel)
-                log.info("Page rect (device pixels): %dx%d",
-                         page_rect.width(), page_rect.height())
-                painter.drawPixmap(page_rect.toRect(), pixmap)
-                painter.end()
-                log.info("Print job sent successfully")
+        # Read back printer/copies in case the user changed them in the dialog.
+        final_printer = printer.printerName()
+        copies = printer.numCopies()
+        log.info("Print dialog accepted — printer='%s', copies=%d", final_printer, copies)
 
+        # Generate print-ready pixmap (1200x1800px portrait canvas, 300 DPI).
+        pixmap = self.preview.get_print_pixmap()
+        if not pixmap:
+            log.error("get_print_pixmap() returned None — print aborted")
+            QMessageBox.critical(self, self.translations.get('error'),
+                               self.translations.get('print_error'))
+            return
+
+        # Convert QPixmap → PNG bytes via PIL so we can embed 300 DPI metadata.
+        # CUPS needs the DPI to map the pixel dimensions to physical paper size.
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.WriteOnly)
+        pixmap.save(buf, "PNG")
+        buf.close()
+        pil_img = Image.open(io.BytesIO(bytes(ba)))
+        pil_img.load()
+
+        fd, temp_path = tempfile.mkstemp(suffix='.png', prefix='pyprintpreview_')
+        os.close(fd)
+        try:
+            pil_img.save(temp_path, "PNG", dpi=(300, 300))
+            log.info("Saved print image to temp file: %s (300 DPI)", temp_path)
+
+            # Determine the correct page size key from the printer's PPD.
+            page_size = self._find_4x6_page_size(final_printer)
+
+            # Build the lp command with explicit CUPS options.
+            cmd = ['lp', '-d', final_printer, '-n', str(copies),
+                   '-o', f'media={page_size.key()}']
+
+            media_type = self.media_type_combo.currentData()
+            if media_type:
+                cmd += ['-o', f'MediaType={media_type}']
+                log.info("MediaType: %s", media_type)
+            else:
+                log.info("MediaType: not set (printer will use its default)")
+
+            paper_source = self.config.get('paper_source', 'auto')
+            cups_source_map = {'rear': 'Rear', 'front': 'Front', 'top': 'Upper'}
+            if paper_source in cups_source_map:
+                cmd += ['-o', f'InputSlot={cups_source_map[paper_source]}']
+                log.info("InputSlot: %s", cups_source_map[paper_source])
+            else:
+                log.info("InputSlot: not set (paper source = %s)", paper_source)
+
+            cmd.append(temp_path)
+            log.info("Submitting via lp: %s", ' '.join(cmd))
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode == 0:
+                log.info("lp submitted successfully: %s", result.stdout.strip())
                 QMessageBox.information(self, self.translations.get('success'),
                                       self.translations.get('print_success'))
             else:
-                log.error("get_print_pixmap() returned None — print aborted")
+                log.error("lp failed (exit %d): %s", result.returncode, result.stderr.strip())
                 QMessageBox.critical(self, self.translations.get('error'),
-                                   self.translations.get('print_error'))
-        else:
-            log.info("Print dialog cancelled by user")
+                                   f"{self.translations.get('print_error')}\n{result.stderr.strip()}")
+        finally:
+            try:
+                os.unlink(temp_path)
+                log.debug("Temp file removed: %s", temp_path)
+            except Exception:
+                pass
 
 
 def main():
