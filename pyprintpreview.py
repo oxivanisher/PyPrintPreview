@@ -815,10 +815,23 @@ class PhotoPrintWindow(QMainWindow):
             self.media_type_combo.addItem(mt, mt)
 
         saved = self.config.get('media_type', '')
-        for i in range(self.media_type_combo.count()):
-            if self.media_type_combo.itemData(i) == saved:
-                self.media_type_combo.setCurrentIndex(i)
-                break
+        matched = False
+        if saved:
+            for i in range(self.media_type_combo.count()):
+                if self.media_type_combo.itemData(i) == saved:
+                    self.media_type_combo.setCurrentIndex(i)
+                    matched = True
+                    break
+
+        if not matched:
+            # No saved preference — auto-select the best match for photo paper.
+            photo_keywords = ['photographic', 'photo', 'gloss']
+            for i in range(self.media_type_combo.count()):
+                val = (self.media_type_combo.itemData(i) or '').lower()
+                if any(kw in val for kw in photo_keywords):
+                    self.media_type_combo.setCurrentIndex(i)
+                    log.info("Auto-selected media type: '%s'", self.media_type_combo.itemData(i))
+                    break
 
         self.media_type_combo.blockSignals(False)
         log.info("Media type combo populated for '%s': %d options, selected='%s'",
