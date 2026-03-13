@@ -919,13 +919,17 @@ class PhotoPrintWindow(QMainWindow):
         dialog = QPrintDialog(printer, self)
         dialog.setWindowTitle(self.translations.get('print_photo'))
 
-        if dialog.exec_() != QPrintDialog.Accepted:
+        dialog_result = dialog.exec_()
+        log.info("Print dialog result: %r  (Accepted=%r)", dialog_result, QPrintDialog.Accepted)
+
+        if dialog_result != QPrintDialog.Accepted:
             log.info("Print dialog cancelled by user")
             return
 
         # Read back printer/copies in case the user changed them in the dialog.
         final_printer = printer.printerName()
         copies = printer.numCopies()
+        log.info("Print dialog accepted — printer='%s', copies=%d", final_printer, copies)
         log.info("Print dialog accepted — printer='%s', copies=%d", final_printer, copies)
 
         try:
